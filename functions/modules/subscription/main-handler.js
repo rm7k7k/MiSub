@@ -9,7 +9,7 @@ import { resolveRequestContext } from './request-context.js';
 import { resolveNodeListWithCache } from './cache-manager.js';
 import { ProcessorService } from '../../services/processor-service.js';
 import { logAccessSuccess, shouldSkipLogging as shouldSkipAccessLog } from './access-logger.js';
-import { isBrowserAgent, determineTargetFormat } from './user-agent-utils.js'; // [Added] Import centralized util
+import { isBrowserAgent, determineTargetFormat, isMetaCore } from './user-agent-utils.js'; // [Added] Import centralized util
 import { authMiddleware } from '../auth-middleware.js';
 import { transformBuiltinSubscription } from './transformer-factory.js';
 import { fetchTransformTemplate } from './transform-template-cache.js';
@@ -466,7 +466,8 @@ export async function handleMisubRequest(context) {
     // 1. If 'nodes' format requested, return Base64 nodes directly (DataSource for external converters)
     if (targetFormat === 'nodes') {
         const contentToEncode = isProfileExpired ? (DEFAULT_EXPIRED_NODE + '\n') : combinedNodeList;
-        // [兼容性优化] 绝大多数第三方转换后端默认期望收到 Base64 编码的订阅内容
+        // [兼容性修复] 第三方转换后端通常默认识别 Base64 编码的订阅。
+        // 虽然明文更直观，但为了通过后端的 WAF 和格式校验，恢复为标准 Base64 编码。
         return new Response(base64EncodeUtf8(contentToEncode), { 
             headers: { 
                 "Content-Type": "text/plain; charset=utf-8", 
@@ -495,11 +496,16 @@ export async function handleMisubRequest(context) {
         
         // Data source is THIS worker, but forcing builtin and nodes format
         const dataSourceUrl = new URL(request.url);
+        
+        // [加固] 彻底清理 URL 参数，防止参数污染导致后端返回 400 错误
+        const paramsToClear = ['target', 'engine', 'builtin', 'clash', 'singbox', 'surge', 'loon', 'quanx', 'egern', 'base64', 'v2ray', 'trojan'];
+        paramsToClear.forEach(p => dataSourceUrl.searchParams.delete(p));
+        
         dataSourceUrl.searchParams.set('target', 'nodes');
         dataSourceUrl.searchParams.set('engine', 'builtin');
 
         // [关键修复] 确保后端拉取数据时包含身份令牌，否则会报 401 (No nodes found)
-        // 优先使用当前请求的 token，其次使用订阅组本身的 token，最后使用全局 token
+        // 恢复显式注入逻辑，以确保在所有路径下第三方转换后端都能成功访问内部数据源
         if (!dataSourceUrl.searchParams.has('token')) {
             const authToken = token || currentProfile?.token || config.mytoken;
             if (authToken) dataSourceUrl.searchParams.set('token', authToken);
@@ -511,6 +517,11 @@ export async function handleMisubRequest(context) {
         const effectiveOptions = { ...globalSub.defaultOptions, ...profileSub.options };
         const flagMap = { udp: 'udp', emoji: 'emoji', scv: 'scv', sort: 'sort', tfo: 'tfo', list: 'list' };
         
+        // [元数据核心支持] 如果是 Meta 核心，告知第三方转换后端使用 Meta 语法
+        if (isMetaCore(userAgentHeader, url.searchParams)) {
+            externalUrl.searchParams.set('meta', 'true');
+        }
+
         Object.entries(flagMap).forEach(([key, paramName]) => {
             const val = url.searchParams.has(paramName) 
                 ? url.searchParams.get(paramName) === 'true' 
@@ -598,7 +609,8 @@ export async function handleMisubRequest(context) {
         skipCertVerify: finalSkipCertVerify,
         enableUdp: finalEnableUdp,
         enableTfo: finalEnableTfo,
-        ruleLevel: ruleLevel // 统一后的规则等级
+        ruleLevel: ruleLevel, // 统一后的规则等级
+        isMeta: isMetaCore(userAgentHeader, url.searchParams)
     };
 
     const managedConfigUrl = buildManagedConfigUrl(request.url);
