@@ -478,7 +478,18 @@ export async function handleMisubRequest(context) {
 
     // 2. If external mode active, build the redirect URL and return 302
     if (isExternalMode && targetFormat !== 'base64') {
-        const backend = url.searchParams.get('backend') || profileSub.backend || globalSub.defaultBackend || "https://sub.id9.cc/sub?";
+        let backend = url.searchParams.get('backend') || profileSub.backend || globalSub.defaultBackend || "https://sub.id9.cc/sub?";
+        
+        // [加固] 防止 UI 标签泄漏到配置中（例如出现 "subconverter 后端" 字样）
+        if (typeof backend === 'string' && (backend.includes('后端') || backend.includes('参数'))) {
+            backend = "https://subapi.cmliussss.net/sub?";
+        }
+
+        // [自动纠错] 如果地址不带 http/https 协议，自动补全，防止 URL 构造失败
+        if (backend && typeof backend === 'string' && !backend.startsWith('http://') && !backend.startsWith('https://')) {
+            backend = 'http://' + backend;
+        }
+
         const externalUrl = new URL(backend);
         externalUrl.searchParams.set('target', targetFormat.includes('&') ? targetFormat.split('&')[0] : targetFormat);
         
@@ -488,9 +499,9 @@ export async function handleMisubRequest(context) {
         dataSourceUrl.searchParams.set('engine', 'builtin');
 
         // [关键修复] 确保后端拉取数据时包含身份令牌，否则会报 401 (No nodes found)
-        // 优先使用 URL 中已有的令牌，如果没有则使用配置中的管理员令牌（假设是管理员在操作）
-        if (!dataSourceUrl.searchParams.has('token') && !dataSourceUrl.searchParams.has('clash')) {
-            const authToken = token || config.mytoken;
+        // 优先使用当前请求的 token，其次使用订阅组本身的 token，最后使用全局 token
+        if (!dataSourceUrl.searchParams.has('token')) {
+            const authToken = token || currentProfile?.token || config.mytoken;
             if (authToken) dataSourceUrl.searchParams.set('token', authToken);
         }
 
@@ -509,6 +520,7 @@ export async function handleMisubRequest(context) {
 
         // Pass Remote Config if applicable
         if (templateUrl && templateSource.kind === 'remote') {
+            // [回滚] 恢复使用 URL 传递配置。虽然 Base64 更可靠，但并非所有后端都支持 base64: 前缀
             externalUrl.searchParams.set('config', templateSource.value);
         }
 
